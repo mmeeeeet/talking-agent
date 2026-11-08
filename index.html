@@ -752,71 +752,111 @@ function ensureAudioCtx() {
    0.5s of cumulative speech arms the end, and 0.8s of quiet after it
    closes the turn. A shorter blip of speech still closes after 2.2s
    of quiet. 12s with no real speech ends an empty turn; a hard 30s
-   cap (independent of the analyser) ends any turn. */
+   cap ends any turn.
+   Termination does NOT depend on the analyser loop, and does NOT
+   depend on the recorder's onstop event. The previous build funnelled
+   every exit — VAD close, empty timeout, hard cap — through
+   recorder.stop() → onstop → resolve; when iOS Safari swallows
+   onstop, all exits die together and LISTENING never ends. Now a
+   wall-clock watchdog is armed before the recorder or the analyser
+   exist, and any stop request arms a force timer that resolves the
+   turn with the chunks already collected whether or not onstop
+   ever arrives. */
 function recordTurn(stream) {
   return new Promise(function (resolve) {
+    var startedAt = Date.now();
+    var chunks = [];
+    var settled = false;
+    var recorder = null;
     var mime = "";
+    var source = null;
+    var vadTimer = null, watchTimer = null, forceTimer = null;
+    var speechMs = 0, silenceMs = 0;
+    var floor = 0.006;
+
+    function buildBlob() {
+      if (!chunks.length) return null;
+      return new Blob(chunks, { type: (recorder && recorder.mimeType) || mime || "audio/webm" });
+    }
+    function finish(blob) {
+      if (settled) return;
+      settled = true;
+      if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+      if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
+      if (forceTimer) { clearTimeout(forceTimer); forceTimer = null; }
+      if (state.forceEndTurn === forceEnd) state.forceEndTurn = null;
+      if (state.recorder === recorder) state.recorder = null;
+      $("levelBar").style.width = "0%";
+      try { if (source) source.disconnect(); } catch (e) {}
+      resolve(blob === undefined ? buildBlob() : blob);
+    }
+    function forceEnd() { finish(); }
+    /* Ask the recorder to stop and flush its last chunk — but the
+       turn resolves via the force timer if onstop never comes, and
+       also if the recorder was not in a state where stop() means
+       anything at all. */
+    function requestStop() {
+      if (settled || forceTimer) return;
+      try { if (recorder && recorder.requestData) recorder.requestData(); } catch (e) {}
+      forceTimer = setTimeout(function () { finish(); }, 1200);
+      try {
+        if (recorder && recorder.state === "recording") recorder.stop();
+      } catch (e) {}
+    }
+    function shouldEnd() {
+      var waitedMs = Date.now() - startedAt;
+      return (speechMs >= 500 && silenceMs >= 800) ||
+             (speechMs >= 300 && silenceMs >= 2200) ||
+             (waitedMs >= 12000 && speechMs < 300) ||
+             waitedMs >= 30000;
+    }
+    /* The watchdog reads only Date.now() and the shared counters.
+       The analyser can stall, throw, or never deliver a reading —
+       this loop still ends the turn: at 12s when no speech was ever
+       counted, at 30s no matter what. */
+    watchTimer = setInterval(function () {
+      if (shouldEnd()) requestStop();
+    }, 250);
+    state.forceEndTurn = forceEnd;
+
     var candidates = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"];
     for (var i = 0; i < candidates.length; i++) {
       try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(candidates[i])) { mime = candidates[i]; break; } } catch (e) {}
     }
-    var recorder;
     try {
       recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-    } catch (e) { resolve(null); return; }
+    } catch (e) { finish(null); return; }
     state.recorder = recorder;
-    var chunks = [];
     recorder.ondataavailable = function (e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = function () { finish(); };
+    recorder.onerror = function () { finish(); };
+
     var ctx = ensureAudioCtx();
-    var analyser = null, source = null, vadTimer = null, hardTimer = null;
-    var speechMs = 0, silenceMs = 0;
-    var floor = 0.006;
-    var startedAt = Date.now();
-    function stopNow() {
-      if (recorder.state === "recording") { try { recorder.stop(); } catch (e) {} }
-    }
     if (ctx) {
       try {
         if (ctx.state === "suspended") { ctx.resume().catch(function () {}); }
         source = ctx.createMediaStreamSource(stream);
-        analyser = ctx.createAnalyser();
+        var analyser = ctx.createAnalyser();
         analyser.fftSize = 512;
         source.connect(analyser);
         var buf = new Uint8Array(analyser.fftSize);
         vadTimer = setInterval(function () {
-          if (!analyser) return;
           analyser.getByteTimeDomainData(buf);
           var sum = 0;
           for (var i = 0; i < buf.length; i++) { var v = (buf[i] - 128) / 128; sum += v * v; }
           var rms = Math.sqrt(sum / buf.length);
           $("levelBar").style.width = Math.min(100, rms * 600) + "%";
-          var waitedMs = Date.now() - startedAt;
           var threshold = Math.max(0.015, Math.min(0.04, floor * 2.8));
           if (rms > threshold) { speechMs += 100; silenceMs = 0; }
           else {
             floor = Math.max(0.003, Math.min(0.03, floor * 0.9 + rms * 0.1));
             if (speechMs > 0) silenceMs += 100;
           }
-          if ((speechMs >= 500 && silenceMs >= 800) ||
-              (speechMs >= 300 && silenceMs >= 2200) ||
-              (waitedMs >= 12000 && speechMs < 300) ||
-              waitedMs >= 30000) {
-            stopNow();
-          }
+          if (shouldEnd()) requestStop();
         }, 100);
-      } catch (e) { analyser = null; }
+      } catch (e) {}
     }
-    recorder.onstop = function () {
-      if (vadTimer) clearInterval(vadTimer);
-      if (hardTimer) clearTimeout(hardTimer);
-      $("levelBar").style.width = "0%";
-      try { if (source) source.disconnect(); } catch (e) {}
-      resolve(chunks.length ? new Blob(chunks, { type: recorder.mimeType || mime || "audio/webm" }) : null);
-    };
-    try { recorder.start(250); } catch (e) { resolve(null); return; }
-    /* The cap holds even if the analyser never delivers a reading
-       (a suspended context reads as perfect silence forever). */
-    hardTimer = setTimeout(stopNow, 30000);
+    try { recorder.start(250); } catch (e) { finish(null); return; }
   });
 }
 
@@ -1025,6 +1065,7 @@ var state = {
   partner: null,
   wakeLock: null,
   recorder: null,
+  forceEndTurn: null,
   startSeq: 0,
   streamRetries: 0
 };
@@ -1230,7 +1271,21 @@ function conversationLoop() {
     }).catch(function () { endSession(); });
   }
   setPhase("listening");
-  return recordTurn(stream).then(function (blob) {
+  /* The listen is also raced against a wall clock out here: if the
+     record promise is somehow still pending at 34s — past every exit
+     it owns — the loop forces it closed, and failing even that,
+     abandons the turn as an empty one and moves on. The chain after
+     the listen can never be starved by the listen itself. */
+  var listen = Promise.race([
+    recordTurn(stream),
+    new Promise(function (res) {
+      setTimeout(function () {
+        if (state.forceEndTurn) { try { state.forceEndTurn(); } catch (e) {} }
+        setTimeout(function () { res(null); }, 1600);
+      }, 34000);
+    })
+  ]);
+  return listen.then(function (blob) {
     if (!state.running) return;
     state.streamRetries = 0;
     if (!blob) {
@@ -1238,7 +1293,19 @@ function conversationLoop() {
         if (state.running) return conversationLoop();
       });
     }
-    return turnFromAudio(blob).then(function (turn) {
+    /* Same protection one step down: every layer inside a turn has
+       its own timeout, but the turn as a whole is raced too — if it
+       ever stalls outright, the loop treats it as a missed turn and
+       listens again instead of sitting in THINKING forever. */
+    var turnRace = Promise.race([
+      turnFromAudio(blob),
+      new Promise(function (res) {
+        setTimeout(function () {
+          res({ heard: "", reply: "", userInHistory: false, noEars: true });
+        }, 90000);
+      })
+    ]);
+    return turnRace.then(function (turn) {
       if (!state.running) return;
       if (turn.noEars) {
         /* Never strand the loop on a missed turn: show the note and
@@ -1335,6 +1402,7 @@ function endSession() {
   state.startSeq += 1;
   if (state.recorder && state.recorder.state === "recording") { try { state.recorder.stop(); } catch (e) {} }
   state.recorder = null;
+  if (state.forceEndTurn) { try { state.forceEndTurn(); } catch (e) {} }
   try { if ("speechSynthesis" in window) window.speechSynthesis.cancel(); } catch (e) {}
   if (state.timerInt) { clearInterval(state.timerInt); state.timerInt = null; }
   $("timerLine").textContent = "";
