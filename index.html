@@ -324,7 +324,7 @@ var CARD = "You are Meet's conversation partner for spoken French and Portuguese
 var COPY_NO_KEY = "She needs her key first — Settings, top field. Paste the Groq key and she runs.";
 var COPY_MIC_DENIED = "The microphone is off for her. Allow it in your browser settings, then tap Talk.";
 var COPY_VOICE_NOTE = "Her voice isn't coming out on this phone right now — nothing was spoken aloud. Check the silent switch and volume, or the voice picked in Settings.";
-var COPY_NO_EARS = "She couldn't hear that one — tap Talk and say it again.";
+var COPY_NO_EARS = "She couldn't hear that one — she's listening again, say it again.";
 
 /* ---------- storage (this page only) ---------- */
 var LS = {
@@ -745,9 +745,14 @@ function ensureAudioCtx() {
   return audioCtx;
 }
 
-/* Record one turn from the held stream. End of turn: after at least
-   1.2s of heard speech, 0.9s of continuous quiet ends it. A turn is
-   capped at 60s; 15s with no speech at all also ends it (empty turn). */
+/* Record one turn from the held stream. End of turn is judged against
+   an adaptive level threshold (a fixed loud bar missed short, quiet
+   answers entirely — the turn then never ended): the noise floor is
+   learned from the quiet ticks, speech counts above ~2.8× that floor,
+   0.5s of cumulative speech arms the end, and 0.8s of quiet after it
+   closes the turn. A shorter blip of speech still closes after 2.2s
+   of quiet. 12s with no real speech ends an empty turn; a hard 30s
+   cap (independent of the analyser) ends any turn. */
 function recordTurn(stream) {
   return new Promise(function (resolve) {
     var mime = "";
@@ -763,10 +768,16 @@ function recordTurn(stream) {
     var chunks = [];
     recorder.ondataavailable = function (e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
     var ctx = ensureAudioCtx();
-    var analyser = null, source = null, vadTimer = null;
-    var speechMs = 0, silenceMs = 0, waitedMs = 0;
+    var analyser = null, source = null, vadTimer = null, hardTimer = null;
+    var speechMs = 0, silenceMs = 0;
+    var floor = 0.006;
+    var startedAt = Date.now();
+    function stopNow() {
+      if (recorder.state === "recording") { try { recorder.stop(); } catch (e) {} }
+    }
     if (ctx) {
       try {
+        if (ctx.state === "suspended") { ctx.resume().catch(function () {}); }
         source = ctx.createMediaStreamSource(stream);
         analyser = ctx.createAnalyser();
         analyser.fftSize = 512;
@@ -779,23 +790,33 @@ function recordTurn(stream) {
           for (var i = 0; i < buf.length; i++) { var v = (buf[i] - 128) / 128; sum += v * v; }
           var rms = Math.sqrt(sum / buf.length);
           $("levelBar").style.width = Math.min(100, rms * 600) + "%";
-          waitedMs += 100;
-          if (rms > 0.035) { speechMs += 100; silenceMs = 0; }
-          else if (speechMs >= 1200) { silenceMs += 100; }
-          if ((speechMs >= 1200 && silenceMs >= 900) || waitedMs >= 60000 || (waitedMs >= 15000 && speechMs < 300)) {
-            if (recorder.state === "recording") { try { recorder.stop(); } catch (e) {} }
+          var waitedMs = Date.now() - startedAt;
+          var threshold = Math.max(0.015, Math.min(0.04, floor * 2.8));
+          if (rms > threshold) { speechMs += 100; silenceMs = 0; }
+          else {
+            floor = Math.max(0.003, Math.min(0.03, floor * 0.9 + rms * 0.1));
+            if (speechMs > 0) silenceMs += 100;
+          }
+          if ((speechMs >= 500 && silenceMs >= 800) ||
+              (speechMs >= 300 && silenceMs >= 2200) ||
+              (waitedMs >= 12000 && speechMs < 300) ||
+              waitedMs >= 30000) {
+            stopNow();
           }
         }, 100);
       } catch (e) { analyser = null; }
     }
     recorder.onstop = function () {
       if (vadTimer) clearInterval(vadTimer);
+      if (hardTimer) clearTimeout(hardTimer);
       $("levelBar").style.width = "0%";
       try { if (source) source.disconnect(); } catch (e) {}
       resolve(chunks.length ? new Blob(chunks, { type: recorder.mimeType || mime || "audio/webm" }) : null);
     };
     try { recorder.start(250); } catch (e) { resolve(null); return; }
-    if (!analyser) setTimeout(function () { if (recorder.state === "recording") { try { recorder.stop(); } catch (e) {} } }, 60000);
+    /* The cap holds even if the analyser never delivers a reading
+       (a suspended context reads as perfect silence forever). */
+    hardTimer = setTimeout(stopNow, 30000);
   });
 }
 
@@ -968,7 +989,7 @@ function deviceListen() {
     rec.continuous = false;
     rec.maxAlternatives = 1;
     var settled = false;
-    var cap = setTimeout(function () { finish(""); }, 45000);
+    var cap = setTimeout(function () { finish(""); }, 12000);
     function finish(v) {
       if (settled) return; settled = true;
       clearTimeout(cap);
@@ -1004,7 +1025,8 @@ var state = {
   partner: null,
   wakeLock: null,
   recorder: null,
-  startSeq: 0
+  startSeq: 0,
+  streamRetries: 0
 };
 
 function setPhase(p) {
@@ -1195,16 +1217,36 @@ function greet() {
 function conversationLoop() {
   if (!state.running) return Promise.resolve();
   var stream = micStream;
-  if (!stream || !stream.active) { endSession(); return Promise.resolve(); }
+  if (!stream || !stream.active) {
+    /* The held stream died mid-session (iOS can end the track when
+       the audio session flips for her voice). Re-acquire it and keep
+       the conversation going instead of ending in silence; only a
+       stream that stays dead ends the session. */
+    state.streamRetries = (state.streamRetries || 0) + 1;
+    if (state.streamRetries > 3) { endSession(); return Promise.resolve(); }
+    return ensureMicStream().then(function () {
+      setMic(true, false);
+      if (state.running) return conversationLoop();
+    }).catch(function () { endSession(); });
+  }
   setPhase("listening");
   return recordTurn(stream).then(function (blob) {
     if (!state.running) return;
-    if (!blob) { return conversationLoop(); }
+    state.streamRetries = 0;
+    if (!blob) {
+      return new Promise(function (r) { setTimeout(r, 400); }).then(function () {
+        if (state.running) return conversationLoop();
+      });
+    }
     return turnFromAudio(blob).then(function (turn) {
       if (!state.running) return;
       if (turn.noEars) {
+        /* Never strand the loop on a missed turn: show the note and
+           listen again. Her next spoken line clears the note. */
         setStatus(COPY_NO_EARS, true);
-        return;
+        return new Promise(function (r) { setTimeout(r, 1200); }).then(function () {
+          if (state.running) return conversationLoop();
+        });
       }
       if (!turn.reply) { return conversationLoop(); }
       if (turn.heard) {
@@ -1262,6 +1304,7 @@ function startSession() {
     state.journaled = false;
     state.startedAt = Date.now();
     state.history = [];
+    state.streamRetries = 0;
     state.turnsFr = 0; state.turnsPt = 0;
     state.partner = Partner.createState();
     state.partner.lang = state.mode;
