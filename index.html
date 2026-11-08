@@ -770,9 +770,12 @@ function recordTurn(stream) {
     var recorder = null;
     var mime = "";
     var source = null;
+    var analyserNode = null;
     var vadTimer = null, watchTimer = null, forceTimer = null;
     var speechMs = 0, silenceMs = 0;
     var floor = 0.006;
+    var peakRms = 0;
+    var analyserLive = false;
 
     function buildBlob() {
       if (!chunks.length) return null;
@@ -786,8 +789,15 @@ function recordTurn(stream) {
       if (forceTimer) { clearTimeout(forceTimer); forceTimer = null; }
       if (state.forceEndTurn === forceEnd) state.forceEndTurn = null;
       if (state.recorder === recorder) state.recorder = null;
+      /* The turn's measured truth, read by the loop: how loud the
+         loudest captured moment was, how much speech was counted,
+         and whether the meter itself was ever actually running. */
+      state.lastTurnPeak = peakRms;
+      state.lastTurnSpeechMs = speechMs;
+      state.lastAnalyserLive = analyserLive;
       $("levelBar").style.width = "0%";
       try { if (source) source.disconnect(); } catch (e) {}
+      try { if (analyserNode) analyserNode.disconnect(); } catch (e) {}
       resolve(blob === undefined ? buildBlob() : blob);
     }
     function forceEnd() { finish(); }
@@ -837,15 +847,23 @@ function recordTurn(stream) {
         if (ctx.state === "suspended") { ctx.resume().catch(function () {}); }
         source = ctx.createMediaStreamSource(stream);
         var analyser = ctx.createAnalyser();
+        analyserNode = analyser;
         analyser.fftSize = 512;
         source.connect(analyser);
         var buf = new Uint8Array(analyser.fftSize);
         vadTimer = setInterval(function () {
+          /* Her voice can leave this context suspended or interrupted;
+             a suspended context reads back pure 128s — a flat line —
+             even when the recorder is hearing fine. Keep asking it to
+             run, and only trust the meter once it is running. */
+          if (ctx.state !== "running") { try { ctx.resume().catch(function () {}); } catch (e) {} }
+          else analyserLive = true;
           analyser.getByteTimeDomainData(buf);
           var sum = 0;
           for (var i = 0; i < buf.length; i++) { var v = (buf[i] - 128) / 128; sum += v * v; }
           var rms = Math.sqrt(sum / buf.length);
-          $("levelBar").style.width = Math.min(100, rms * 600) + "%";
+          if (rms > peakRms) peakRms = rms;
+          $("levelBar").style.width = Math.min(100, rms * 900) + "%";
           var threshold = Math.max(0.015, Math.min(0.04, floor * 2.8));
           if (rms > threshold) { speechMs += 100; silenceMs = 0; }
           else {
@@ -1067,7 +1085,12 @@ var state = {
   recorder: null,
   forceEndTurn: null,
   startSeq: 0,
-  streamRetries: 0
+  streamRetries: 0,
+  deadTurns: 0,
+  micRefreshNeeded: false,
+  lastTurnPeak: 0,
+  lastTurnSpeechMs: 0,
+  lastAnalyserLive: false
 };
 
 function setPhase(p) {
@@ -1175,6 +1198,10 @@ function speakHer(rawText, slow) {
         setStatus("");
       }
     }).then(function (spoke) {
+      /* She has spoken: this phone's audio session has been flipped
+         to playback, so the capture must be rebuilt before the next
+         listen (see conversationLoop). */
+      state.micRefreshNeeded = true;
       if (!spoke) {
         /* Nothing was heard. The line still reaches the screen, with
            the one honest note — never as if she had spoken. */
@@ -1255,14 +1282,60 @@ function greet() {
 }
 
 /* ---------- the loop ---------- */
+function killMicStream() {
+  if (!micStream) return;
+  try { micStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); } catch (e) {}
+  micStream = null;
+}
+
+/* A turn that settled with no usable sound. Never loop in silence:
+   she says out loud, once per cycle, that she heard nothing, and the
+   capture is rebuilt before she listens again. After three dead
+   turns in a row she stops pretending — she says so plainly, out
+   loud and on screen, and the session ends. */
+function handleMissedTurn(streamDead) {
+  if (!state.running) return Promise.resolve();
+  state.deadTurns = (state.deadTurns || 0) + 1;
+  if (state.deadTurns >= 3) {
+    var msg = "Still no sound reaching her after several tries — this phone's microphone stream is coming through silent, so she has stopped instead of pretending to listen. Tap Talk to start a fresh session; if it stays silent, close the page completely and reopen it.";
+    return speakLine("I still can't hear anything at all. Let's stop here, and start fresh.", { lang: "en" }).then(function () {
+      endSession();
+      killMicStream(); /* the next Talk starts from a fresh capture */
+      setStatus(msg, true);
+    });
+  }
+  if (streamDead) setStatus("No sound at all reached her — reconnecting the microphone…", true);
+  else setStatus(COPY_NO_EARS, true);
+  var line = state.mode === "pt"
+    ? "Não ouvi nada. Estou ouvindo — pode falar."
+    : "Je n'ai rien entendu. Je t'écoute — vas-y, parle.";
+  $("herLine").textContent = line;
+  return speakLine(line, { lang: state.mode }).then(function () {
+    /* The reprompt was speech too — rebuild the capture after it. */
+    state.micRefreshNeeded = true;
+    if (state.running) return conversationLoop();
+  });
+}
+
 function conversationLoop() {
   if (!state.running) return Promise.resolve();
+  /* Her voice flips this phone's audio session to playback, and a
+     mic stream opened before she spoke can come back delivering
+     digital silence even though permission is fine — the iOS failure
+     behind a flat level line, empty transcriptions, and no reply,
+     ever. So after every spoken line the capture is rebuilt before
+     listening: old tracks stopped, a fresh stream taken. Permission
+     for the page is already granted, so this never asks again — it
+     just reopens the door. */
+  if (state.micRefreshNeeded) {
+    state.micRefreshNeeded = false;
+    killMicStream();
+  }
   var stream = micStream;
   if (!stream || !stream.active) {
-    /* The held stream died mid-session (iOS can end the track when
-       the audio session flips for her voice). Re-acquire it and keep
-       the conversation going instead of ending in silence; only a
-       stream that stays dead ends the session. */
+    /* The held stream died (or was just rebuilt). Re-acquire it and
+       keep the conversation going instead of ending in silence;
+       only a stream that stays dead ends the session. */
     state.streamRetries = (state.streamRetries || 0) + 1;
     if (state.streamRetries > 3) { endSession(); return Promise.resolve(); }
     return ensureMicStream().then(function () {
@@ -1270,6 +1343,10 @@ function conversationLoop() {
       if (state.running) return conversationLoop();
     }).catch(function () { endSession(); });
   }
+  return listenStep(stream);
+}
+
+function listenStep(stream) {
   setPhase("listening");
   /* The listen is also raced against a wall clock out here: if the
      record promise is somehow still pending at 34s — past every exit
@@ -1289,10 +1366,23 @@ function conversationLoop() {
     if (!state.running) return;
     state.streamRetries = 0;
     if (!blob) {
-      return new Promise(function (r) { setTimeout(r, 400); }).then(function () {
-        if (state.running) return conversationLoop();
-      });
+      return handleMissedTurn(false);
     }
+    /* Zero-energy check on the captured samples themselves. If the
+       meter was live for this turn and still counted no speech —
+       and especially if the loudest moment never rose above digital
+       silence — this recording holds nothing transcribable. Sending
+       it down the chain would only buy a long, silent THINKING while
+       the layers time out one by one. Treat it as a missed turn
+       instead: she re-prompts out loud and the stream is rebuilt.
+       (If the meter itself never ran, its zeros prove nothing about
+       the recording — that blob still goes to her ears.) */
+    if (state.lastAnalyserLive && (state.lastTurnSpeechMs || 0) < 300) {
+      var dead = (state.lastTurnPeak || 0) <= 0.002;
+      if (dead) state.micRefreshNeeded = true;
+      return handleMissedTurn(dead);
+    }
+    state.deadTurns = 0;
     /* Same protection one step down: every layer inside a turn has
        its own timeout, but the turn as a whole is raced too — if it
        ever stalls outright, the loop treats it as a missed turn and
@@ -1308,12 +1398,11 @@ function conversationLoop() {
     return turnRace.then(function (turn) {
       if (!state.running) return;
       if (turn.noEars) {
-        /* Never strand the loop on a missed turn: show the note and
-           listen again. Her next spoken line clears the note. */
-        setStatus(COPY_NO_EARS, true);
-        return new Promise(function (r) { setTimeout(r, 1200); }).then(function () {
-          if (state.running) return conversationLoop();
-        });
+        /* Never strand the loop on a missed turn — and never just
+           re-listen in silence either: she says she heard nothing
+           out loud, and repeated dead turns end the session with a
+           plain explanation (see handleMissedTurn). */
+        return handleMissedTurn(false);
       }
       if (!turn.reply) { return conversationLoop(); }
       if (turn.heard) {
@@ -1372,6 +1461,11 @@ function startSession() {
     state.startedAt = Date.now();
     state.history = [];
     state.streamRetries = 0;
+    state.deadTurns = 0;
+    state.micRefreshNeeded = false;
+    state.lastTurnPeak = 0;
+    state.lastTurnSpeechMs = 0;
+    state.lastAnalyserLive = false;
     state.turnsFr = 0; state.turnsPt = 0;
     state.partner = Partner.createState();
     state.partner.lang = state.mode;
