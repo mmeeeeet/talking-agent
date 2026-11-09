@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="dark" />
-<meta name="theme-color" content="#000000" />
+<meta name="theme-color" content="#0c1424" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black" />
@@ -14,18 +14,18 @@
 <title>Talking Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital@1&family=IBM+Plex+Mono:wght@400;500&family=Oswald:wght@500;600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital@1&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:ital,wght@0,600;0,700;1,500&display=swap" rel="stylesheet" />
 <style>
   :root{
-    --black:#000000;
-    --cream:#F2EDE3;
-    --cream-dim:rgba(242,237,227,.62);
-    --cream-faint:rgba(242,237,227,.38);
-    --red:#C8102E;
-    --oxblood-1:#6E1420;
-    --oxblood-2:#9E1B30;
-    --hair:rgba(242,237,227,.16);
-    --panel:#0A0A0A;
+    --black:#0c1424;
+    --cream:#f4efe6;
+    --cream-dim:rgba(244,239,230,.62);
+    --cream-faint:rgba(244,239,230,.38);
+    --red:#d8b878;
+    --oxblood-1:#8a6d35;
+    --oxblood-2:#d8b878;
+    --hair:#31405c;
+    --panel:#0a1120;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;padding:0;background:var(--black)}
@@ -74,7 +74,7 @@
   /* ---------- centre ---------- */
   .centre{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px 0 8px}
   .state{
-    font-family:"Oswald",sans-serif;font-weight:600;
+    font-family:"Playfair Display",serif;font-weight:600;
     font-size:clamp(56px,17vw,104px);
     letter-spacing:.06em;line-height:1;text-transform:uppercase;
     background:linear-gradient(180deg,var(--oxblood-2) 0%,var(--oxblood-1) 78%);
@@ -83,7 +83,7 @@
     text-align:center;user-select:none;
   }
   .state.live{
-    background:linear-gradient(180deg,#E8DFCE 0%,#B9B0A0 80%);
+    background:linear-gradient(180deg,#f4efe6 0%,#cdbf9f 80%);
     -webkit-background-clip:text;background-clip:text;
   }
   .orb-wrap{margin-top:34px;position:relative}
@@ -93,22 +93,22 @@
     border:1px solid var(--hair);
     display:flex;align-items:center;justify-content:center;
     position:relative;color:var(--red);
-    font-family:"Oswald",sans-serif;font-weight:600;
+    font-family:"Playfair Display",serif;font-weight:600;
     font-size:clamp(34px,10vw,46px);letter-spacing:.22em;text-indent:.22em;
     user-select:none;
   }
   .orb::before{
     content:"";position:absolute;inset:11px;border-radius:50%;
-    border:1px solid rgba(242,237,227,.08);pointer-events:none;
+    border:1px solid rgba(244,239,230,.08);pointer-events:none;
   }
-  .orb:active{border-color:rgba(200,16,46,.6)}
-  .orb.talking{color:var(--cream);border-color:rgba(200,16,46,.55)}
+  .orb:active{border-color:rgba(216,184,120,.6)}
+  .orb.talking{color:var(--cream);border-color:rgba(216,184,120,.55)}
   .orb.listen{animation:pulse 1.6s ease-in-out infinite}
-  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(200,16,46,.0)}50%{box-shadow:0 0 0 10px rgba(200,16,46,.07)}}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(216,184,120,0)}50%{box-shadow:0 0 0 10px rgba(216,184,120,.07)}}
   @media (prefers-reduced-motion: reduce){.orb.listen{animation:none}}
   .level{
     height:4px;width:min(52vw,220px);margin-top:22px;
-    background:rgba(242,237,227,.08);border-radius:2px;overflow:hidden;
+    background:rgba(244,239,230,.08);border-radius:2px;overflow:hidden;
   }
   .level > div{height:100%;width:0%;background:var(--red);transition:width .12s linear}
   .status-line{
@@ -116,7 +116,7 @@
     text-align:center;color:var(--cream-dim);
     font-size:14px;line-height:1.65;
   }
-  .status-line.alert{color:#E9A7B2}
+  .status-line.alert{color:#e8cf9e}
   .her-line{
     margin-top:6px;max-width:520px;text-align:center;
     color:var(--cream);font-size:14px;line-height:1.65;min-height:0;
@@ -143,7 +143,7 @@
   .helper .q{color:var(--cream-dim)}
   /* ---------- settings sheet ---------- */
   .sheet-veil{
-    position:fixed;inset:0;background:rgba(0,0,0,.72);
+    position:fixed;inset:0;background:rgba(4,8,16,.72);
     display:none;z-index:20;
   }
   .sheet-veil.open{display:block}
@@ -156,7 +156,7 @@
   }
   .sheet.open{display:block}
   .sheet h2{
-    font-family:"Oswald",sans-serif;font-weight:600;letter-spacing:.18em;
+    font-family:"Playfair Display",serif;font-weight:600;letter-spacing:.18em;
     font-size:20px;margin:0 0 4px;text-transform:uppercase;color:var(--cream);
   }
   .sheet .sub{color:var(--cream-faint);font-size:12px;line-height:1.7;margin:0 0 18px}
@@ -168,7 +168,7 @@
   .field .hint{color:var(--red);font-size:12px;margin-top:6px;min-height:15px}
   .key-row{display:flex;gap:8px}
   .key-row input{
-    flex:1;min-width:0;background:#000;border:1px solid var(--hair);
+    flex:1;min-width:0;background:#060d1a;border:1px solid var(--hair);
     color:var(--cream);font-family:inherit;font-size:14px;
     padding:12px;border-radius:6px;min-height:48px;
   }
@@ -180,10 +180,10 @@
   }
   .btn:active{border-color:var(--red)}
   .btn.wide{width:100%;margin-top:8px}
-  .btn.red{border-color:rgba(200,16,46,.55);color:#F0C4CC}
-  .key-note{color:#E9A7B2;font-size:13px;line-height:1.6;min-height:18px;margin:2px 0 14px}
+  .btn.red{border-color:rgba(216,184,120,.55);color:#e8cf9e}
+  .key-note{color:#e8cf9e;font-size:13px;line-height:1.6;min-height:18px;margin:2px 0 14px}
   .field select{
-    width:100%;background:#000;border:1px solid var(--hair);color:var(--cream);
+    width:100%;background:#060d1a;border:1px solid var(--hair);color:var(--cream);
     font-family:inherit;font-size:14px;padding:12px;border-radius:6px;min-height:48px;
   }
   .rate-row{display:flex;align-items:center;gap:14px}
@@ -209,19 +209,19 @@
 <header class="top">
   <div class="brand">
     <svg class="bouquet" width="30" height="40" viewBox="0 0 30 40" aria-hidden="true">
-      <g stroke="#8f887b" stroke-width="1.1" fill="none">
+      <g stroke="#8b93a0" stroke-width="1.1" fill="none">
         <path d="M11 22 L14 38" /><path d="M15 20 L15 38" /><path d="M19 22 L16 38" />
       </g>
-      <g fill="#1c1c1c" stroke="#6f6a5f" stroke-width="0.8">
+      <g fill="#05080f" stroke="#5f6a76" stroke-width="0.8">
         <circle cx="8" cy="14" r="3.4"/><circle cx="13.4" cy="11" r="3.4"/><circle cx="10.6" cy="18" r="3.4"/><circle cx="6.4" cy="18.6" r="3"/><circle cx="13.8" cy="16.6" r="3"/>
       </g>
-      <g fill="#1c1c1c" stroke="#6f6a5f" stroke-width="0.8">
+      <g fill="#05080f" stroke="#5f6a76" stroke-width="0.8">
         <circle cx="22" cy="14" r="3.4"/><circle cx="16.6" cy="11" r="3.4"/><circle cx="19.4" cy="18" r="3.4"/><circle cx="23.6" cy="18.6" r="3"/><circle cx="16.2" cy="16.6" r="3"/>
       </g>
-      <g fill="#9E1B30">
+      <g fill="#8a6d35">
         <circle cx="15" cy="6.4" r="3.6"/><circle cx="10.8" cy="9.6" r="3.4"/><circle cx="19.2" cy="9.6" r="3.4"/><circle cx="12.4" cy="13.4" r="3.2"/><circle cx="17.6" cy="13.4" r="3.2"/>
       </g>
-      <circle cx="15" cy="10" r="2" fill="#C8102E"/>
+      <circle cx="15" cy="10" r="2" fill="#d8b878"/>
     </svg>
     <div>
       <div class="date-line" id="dateLine">—</div>
